@@ -8,6 +8,7 @@ from pathlib import Path
 import argparse
 
 import matplotlib
+# Use a non-interactive backend so figures can also be created without a GUI.
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,20 +16,27 @@ from numba import njit
 
 
 # Lennard-Jones reduced units: sigma = epsilon = mass = k_B = 1.
+# Consequently, all lengths, energies, times, and temperatures below are
+# dimensionless reduced quantities.
 N = 125
 L = 30.0
 rho = N / L**3
 dt = 0.005
+# Pair interactions are evaluated only up to this distance.
 rcut = 4.0
 rcut2 = rcut**2
+# Subtracting the potential at the cutoff makes U(rcut) = 0.
 Ecut = 4.0 * (rcut**-12 - rcut**-6)
 
 
 def init_positions(n_particles, box_length):
     """Put particles on a cubic lattice without overlapping them."""
+    # Use enough lattice sites to hold every particle.
     n_side = int(np.ceil(n_particles ** (1.0 / 3.0)))
     spacing = box_length / n_side
+    # Offset by half a lattice spacing so no particle lies on a box boundary.
     coordinates = (np.arange(n_side) + 0.5) * spacing
+    # meshgrid forms every possible combination of the x, y, and z coordinates.
     grid = np.array(np.meshgrid(coordinates, coordinates, coordinates,
                                 indexing="ij")).reshape(3, -1).T
     return grid[:n_particles].copy()
@@ -36,6 +44,7 @@ def init_positions(n_particles, box_length):
 
 def init_velocities(n_particles, temperature, rng):
     """Draw velocities, remove centre-of-mass motion, and set temperature."""
+    # Start with random Cartesian velocity components in [-0.5, 0.5).
     velocities = rng.random((n_particles, 3)) - 0.5
     # Zero total momentum by removing the centre-of-mass velocity.
     velocities -= velocities.mean(axis=0)
@@ -48,10 +57,12 @@ def init_velocities(n_particles, temperature, rng):
 @njit
 def compute_forces(positions, box_length):
     """Return truncated-and-shifted LJ forces and potential energy."""
+    # A separate force vector is accumulated for each particle.
     forces = np.zeros_like(positions)
     potential_energy = 0.0
     rij = np.empty(3, dtype=np.float64)
     n_particles = positions.shape[0]
+    # j starts at i+1 so every particle pair is evaluated exactly once.
     for i in range(n_particles):
         for j in range(i + 1, n_particles):
             for k in range(3):
@@ -62,6 +73,7 @@ def compute_forces(positions, box_length):
             r2 = rij[0]**2 + rij[1]**2 + rij[2]**2
             # Interactions outside the cutoff are neglected.
             if r2 < rcut2:
+                # Powers of 1/r^2 avoid repeated, expensive square roots.
                 inv_r2 = 1.0 / r2
                 inv_r6 = inv_r2**3
                 inv_r12 = inv_r6**2
@@ -71,6 +83,7 @@ def compute_forces(positions, box_length):
                     pair_force = force_factor * rij[k]
                     forces[i, k] += pair_force
                     forces[j, k] -= pair_force
+                # Shift the LJ potential so it goes continuously to zero at rcut.
                 potential_energy += 4.0 * (inv_r12 - inv_r6) - Ecut
     return forces, potential_energy
 
@@ -78,7 +91,9 @@ def compute_forces(positions, box_length):
 @njit
 def calc_positionsv2v(positions, velocities, step_size, box_length):
     """Drift positions for one full step and wrap them into the box."""
+    # After the first half-kick, these velocities represent the half time step.
     positions += velocities * step_size
+    # Periodic boundaries map every coordinate back to [0, box_length).
     positions %= box_length
     return positions
 
@@ -86,6 +101,7 @@ def calc_positionsv2v(positions, velocities, step_size, box_length):
 @njit
 def calc_velocitiesv2v(velocities, forces, step_size):
     """Apply one half-kick (unit particle mass)."""
+    # With mass equal to one, acceleration is numerically equal to force.
     velocities += 0.5 * forces * step_size
     return velocities
 
@@ -94,7 +110,9 @@ def calc_velocitiesv2v(velocities, forces, step_size):
 def simulate(positions, velocities, box_length, step_size, n_steps,
              sample_every, trajectory_every):
     """Run velocity Verlet and retain sampled observables and trajectory."""
+    # Forces at the initial positions are needed for the first half-kick.
     forces, potential_energy = compute_forces(positions, box_length)
+    # Preallocate output arrays because allocation inside a JIT loop is costly.
     n_samples = n_steps // sample_every + 1
     n_frames = n_steps // trajectory_every + 1
     measurements = np.empty((n_samples, 9))
@@ -103,9 +121,12 @@ def simulate(positions, velocities, box_length, step_size, n_steps,
     frame_index = 0
 
     for step in range(n_steps + 1):
+        # Thermodynamic observables need not be stored at every integration step.
         if step % sample_every == 0:
             kinetic_energy = 0.5 * np.sum(velocities**2)
+            # Equipartition in 3D gives T = 2 K / (3 N), with k_B = 1.
             temperature = 2.0 * kinetic_energy / (3.0 * positions.shape[0])
+            # Momentum should remain approximately zero throughout the run.
             momentum = np.sum(velocities, axis=0)
             measurements[sample_index, 0] = step
             measurements[sample_index, 1] = step * step_size
@@ -116,11 +137,14 @@ def simulate(positions, velocities, box_length, step_size, n_steps,
             measurements[sample_index, 6:9] = momentum
             sample_index += 1
         if step % trajectory_every == 0:
+            # Store fewer XYZ frames than integration steps to limit file size.
             trajectory[frame_index] = positions
             frame_index += 1
         if step == n_steps:
             break
 
+        # Velocity Verlet sequence: half-kick, full drift, force update,
+        # and a second half-kick using the force at the new positions.
         velocities = calc_velocitiesv2v(velocities, forces, step_size)
         positions = calc_positionsv2v(positions, velocities, step_size,
                                       box_length)
@@ -132,8 +156,10 @@ def simulate(positions, velocities, box_length, step_size, n_steps,
 
 def write_xyz(filename, trajectory, trajectory_every, step_size, element="Ar"):
     """Write a complete (overwriting) wrapped XYZ trajectory."""
+    # Opening with mode "w" prevents a new run being appended to an old one.
     with open(filename, "w", encoding="utf-8") as handle:
         for frame_index, positions in enumerate(trajectory):
+            # XYZ frames begin with particle count followed by one comment line.
             handle.write(f"{positions.shape[0]}\n")
             time = frame_index * trajectory_every * step_size
             handle.write(f"time = {time:.6f}; box = {L:.6f}\n")
@@ -142,13 +168,16 @@ def write_xyz(filename, trajectory, trajectory_every, step_size, element="Ar"):
 
 
 def plot_measurements(all_measurements, output_dir):
+    # Fixed colours make the same initial temperature recognizable in all plots.
     colors = {0.1: "tab:blue", 1.5: "tab:orange"}
 
+    # The first figure directly tests NVE energy and momentum conservation.
     fig, axes = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
     for temperature, values in all_measurements.items():
         label = rf"$T_0={temperature:g}$"
         color = colors.get(temperature)
         energy0 = values[0, 3]
+        # Plot the energy change rather than its large absolute value.
         axes[0].plot(values[:, 1], values[:, 3] - energy0,
                      label=label, color=color, linewidth=1)
         momentum_norm = np.linalg.norm(values[:, 6:9], axis=1)
@@ -166,6 +195,7 @@ def plot_measurements(all_measurements, output_dir):
     fig.savefig(output_dir / "conservation.png", dpi=180)
     plt.close(fig)
 
+    # The second figure reveals heating/cooling and changes in particle binding.
     fig, axes = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
     for temperature, values in all_measurements.items():
         label = rf"$T_0={temperature:g}$"
@@ -188,6 +218,7 @@ def plot_measurements(all_measurements, output_dir):
 
 
 def main():
+    # Command-line options allow shorter tests without editing the source code.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--steps", type=int, default=100_000)
     parser.add_argument("--sample-every", type=int, default=100)
@@ -198,13 +229,16 @@ def main():
     parser.add_argument("--results", type=Path,
                         default=Path(__file__).parent / "results")
     args = parser.parse_args()
+    # Create the output directory if this is the first run.
     args.results.mkdir(parents=True, exist_ok=True)
 
     all_measurements = {}
     header = "step time temperature total_energy kinetic_energy potential_energy Px Py Pz"
     for run_index, temperature in enumerate(args.temperatures):
         print(f"Running T_init={temperature:g} for {args.steps} steps ...")
+        # A reproducible but different random velocity set is used for each run.
         rng = np.random.default_rng(args.seed + run_index)
+        # C-contiguous float arrays give Numba efficient memory access.
         positions = np.ascontiguousarray(init_positions(N, L), dtype=np.float64)
         velocities = np.ascontiguousarray(
             init_velocities(N, temperature, rng), dtype=np.float64)
@@ -212,6 +246,7 @@ def main():
             positions, velocities, L, dt, args.steps, args.sample_every,
             args.trajectory_every)
         tag = f"T{temperature:g}".replace(".", "p")
+        # Save numerical data separately from the figures for later analysis.
         np.savetxt(args.results / f"measurements_{tag}.txt", measurements,
                    header=header)
         write_xyz(args.results / f"trajectory_{tag}.xyz", trajectory,
@@ -221,6 +256,7 @@ def main():
         max_momentum = np.max(np.linalg.norm(measurements[:, 6:9], axis=1))
         print(f"  max |E-E0|={drift:.3e}; max |P|={max_momentum:.3e}")
 
+    # Compare all requested temperatures on common axes.
     plot_measurements(all_measurements, args.results)
     print(f"Results written to {args.results.resolve()}")
 

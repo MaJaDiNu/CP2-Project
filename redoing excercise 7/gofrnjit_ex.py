@@ -4,6 +4,7 @@ from pathlib import Path
 import argparse
 
 import matplotlib
+# Use a file-only plotting backend; no display window is required.
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,10 +13,12 @@ from numba import njit
 
 def read_xyz(filename):
     """Read all frames from an XYZ trajectory into a 3-D NumPy array."""
+    # Each list entry will become one (N, 3) trajectory frame.
     frames = []
     n_particles = None
     with open(filename, "r", encoding="utf-8") as handle:
         while True:
+            # The first line of every XYZ frame contains the particle count.
             line = handle.readline()
             if not line:
                 break
@@ -26,10 +29,12 @@ def read_xyz(filename):
                 n_particles = frame_n
             elif frame_n != n_particles:
                 raise ValueError("Particle count changes between XYZ frames")
+            # The second XYZ line is descriptive and contains no coordinates.
             if not handle.readline():
                 raise ValueError("Missing XYZ comment line")
             positions = np.empty((frame_n, 3), dtype=np.float64)
             for i in range(frame_n):
+                # Ignore the element label in column zero and read x, y, z.
                 parts = handle.readline().split()
                 if len(parts) < 4:
                     raise ValueError("Incomplete XYZ particle record")
@@ -37,12 +42,14 @@ def read_xyz(filename):
             frames.append(positions)
     if not frames:
         raise ValueError(f"No frames found in {filename}")
+    # Numba requires a regular numeric array rather than a Python list of frames.
     return n_particles, np.ascontiguousarray(np.asarray(frames))
 
 
 @njit
 def compute_g(positions, box_length, n_particles, dr, dmax, nbins):
     """Histogram pair distances using periodic minimum images and normalise."""
+    # Bin k counts neighbour distances in [k*dr, (k+1)*dr).
     counts = np.zeros(nbins)
     n_frames = positions.shape[0]
     dx = np.empty(3, dtype=np.float64)
@@ -54,13 +61,17 @@ def compute_g(positions, box_length, n_particles, dr, dmax, nbins):
                 for component in range(3):
                     dx[component] = (positions[frame, i, component]
                                      - positions[frame, j, component])
+                    # Minimum-image convention selects the nearest periodic copy.
                     dx[component] -= box_length * np.rint(
                         dx[component] / box_length)
                 distance = np.sqrt(dx[0]**2 + dx[1]**2 + dx[2]**2)
                 if distance < dmax:
+                    # Add two because i sees j and j also sees i.
                     counts[int(distance / dr)] += 2.0
 
+    # Plot each bin at the centre of its spherical shell.
     r_values = (np.arange(nbins) + 0.5) * dr
+    # Exact volume of a shell between its inner and outer radii.
     shell_volumes = (4.0 / 3.0) * np.pi * (
         (r_values + dr / 2.0)**3 - (r_values - dr / 2.0)**3)
     number_density = n_particles / box_length**3
@@ -73,6 +84,7 @@ def compute_g(positions, box_length, n_particles, dr, dmax, nbins):
 def main():
     script_dir = Path(__file__).parent
     default_results = script_dir / "results"
+    # With no filenames supplied, analyse the two trajectories from the MD script.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("trajectories", type=Path, nargs="*",
                         default=[default_results / "trajectory_T0p1.xyz",
@@ -83,20 +95,24 @@ def main():
     args = parser.parse_args()
     args.results.mkdir(parents=True, exist_ok=True)
 
+    # L/2 is the largest unambiguous distance under minimum-image boundaries.
     dmax = args.box_length / 2.0
     nbins = int(dmax / args.dr)
     fig, ax = plt.subplots(figsize=(8, 5))
     for trajectory_file in args.trajectories:
+        # Calculate g(r) independently for each temperature trajectory.
         n_particles, positions = read_xyz(trajectory_file)
         r_values, g_values = compute_g(positions, args.box_length,
                                        n_particles, args.dr, dmax, nbins)
         output_file = args.results / f"g_r_{trajectory_file.stem}.txt"
+        # Keep the numerical RDF values available for reports or further plots.
         np.savetxt(output_file, np.column_stack((r_values, g_values)),
                    header="r g(r)", fmt="%.6f %.6f")
         label = trajectory_file.stem.replace("trajectory_", "").replace("p", ".")
         ax.plot(r_values, g_values, linewidth=1.4, label=label)
         print(f"Analysed {positions.shape[0]} frames from {trajectory_file}")
 
+    # An ideal, spatially uncorrelated gas has g(r) = 1.
     ax.axhline(1.0, color="0.45", linestyle="--", linewidth=1,
                label="ideal gas")
     ax.set(xlabel="r", ylabel="g(r)", title="Radial distribution functions",
@@ -104,6 +120,7 @@ def main():
     ax.grid(alpha=0.25)
     ax.legend()
     fig.tight_layout()
+    # A high-resolution PNG is suitable for inserting into the exercise report.
     fig.savefig(args.results / "radial_distribution.png", dpi=180)
     plt.close(fig)
     print(f"Results written to {args.results.resolve()}")

@@ -1,0 +1,8 @@
+# Local Python environments and caches
+.python_packages/
+__pycache__/
+*.py[cod]
+
+# Temporary working files
+tmp/
+redoing excercise 7/results_smoke/

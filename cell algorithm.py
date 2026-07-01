@@ -28,6 +28,10 @@ rcut2 = rcut**2
 # Subtracting the potential at the cutoff makes U(rcut) = 0.
 Ecut = 4.0 * (rcut**-12 - rcut**-6)
 
+
+#cell length
+rcell=5
+
 def init_positions(n_particles, box_length):
     """Put particles on a cubic lattice without overlapping them."""
     # Use enough lattice sites to hold every particle.
@@ -53,8 +57,28 @@ def init_velocities(n_particles, temperature, rng):
     return velocities
 
 
+
+ncell_x = int(L / rcell)
+ncell_y = int(L / rcell)
+ncell_z = int(L / rcell)
+
+
 @njit
-def compute_forces(positions, box_length):
+def cells_are_neighbours(ci, cj, ncell_x, ncell_y, ncell_z):
+    dx = abs(ci[0] - cj[0])
+    dy = abs(ci[1] - cj[1])
+    dz = abs(ci[2] - cj[2])
+
+    # periodic cell distance
+    dx = min(dx, ncell_x - dx)
+    dy = min(dy, ncell_y - dy)
+    dz = min(dz, ncell_z - dz)
+
+    return dx <= 1 and dy <= 1 and dz <= 1
+
+
+@njit
+def compute_forces(positions, cell_index, box_length):
     """Return truncated-and-shifted LJ forces and potential energy."""
     # A separate force vector is accumulated for each particle.
     forces = np.zeros_like(positions)
@@ -64,26 +88,27 @@ def compute_forces(positions, box_length):
     # j starts at i+1 so every particle pair is evaluated exactly once.
     for i in range(n_particles):
         for j in range(i + 1, n_particles):
-            for k in range(3):
-                # Minimum-image displacement r_i-r_j.
-                rij[k] = positions[i, k] - positions[j, k]
-                rij[k] -= box_length * np.rint(rij[k] / box_length)
-
-            r2 = rij[0]**2 + rij[1]**2 + rij[2]**2
-            # Interactions outside the cutoff are neglected.
-            if r2 < rcut2:
-                # Powers of 1/r^2 avoid repeated, expensive square roots.
-                inv_r2 = 1.0 / r2
-                inv_r6 = inv_r2**3
-                inv_r12 = inv_r6**2
-                force_factor = (48.0 * inv_r12 - 24.0 * inv_r6) * inv_r2
-                # Newton's third law: equal and opposite pair forces.
+            if cells_are_neighbours(cell_index[i], cell_index[j],ncell_x, ncell_y, ncell_z):
                 for k in range(3):
-                    pair_force = force_factor * rij[k]
-                    forces[i, k] += pair_force
-                    forces[j, k] -= pair_force
-                # Shift the LJ potential so it goes continuously to zero at rcut.
-                potential_energy += 4.0 * (inv_r12 - inv_r6) - Ecut
+                    # Minimum-image displacement r_i-r_j.
+                    rij[k] = positions[i, k] - positions[j, k]
+                    rij[k] -= box_length * np.rint(rij[k] / box_length)
+
+                r2 = rij[0]**2 + rij[1]**2 + rij[2]**2
+                # Interactions outside the cutoff are neglected.
+                if r2 < rcut2:
+                    # Powers of 1/r^2 avoid repeated, expensive square roots.
+                    inv_r2 = 1.0 / r2
+                    inv_r6 = inv_r2**3
+                    inv_r12 = inv_r6**2
+                    force_factor = (48.0 * inv_r12 - 24.0 * inv_r6) * inv_r2
+                    # Newton's third law: equal and opposite pair forces.
+                    for k in range(3):
+                        pair_force = force_factor * rij[k]
+                        forces[i, k] += pair_force
+                        forces[j, k] -= pair_force
+                    # Shift the LJ potential so it goes continuously to zero at rcut.
+                    potential_energy += 4.0 * (inv_r12 - inv_r6) - Ecut
     return forces, potential_energy
 
 
@@ -94,7 +119,9 @@ def calc_positionsv2v(positions, velocities, step_size, box_length):
     positions += velocities * step_size
     # Periodic boundaries map every coordinate back to [0, box_length).
     positions %= box_length
-    return positions
+    """calculate the cell index for each particle"""
+    cell_index = (positions / rcell).astype(np.int64)
+    return positions, cell_index
 
 
 @njit

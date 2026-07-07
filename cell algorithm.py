@@ -57,12 +57,13 @@ def init_velocities(n_particles, temperature, rng):
     return velocities
 
 
-
+# Define the number of cells
 ncell_x = int(L / rcell)
 ncell_y = int(L / rcell)
 ncell_z = int(L / rcell)
 
 
+# Check the neighbour cells
 @njit
 def cells_are_neighbours(ci, cj, ncell_x, ncell_y, ncell_z):
     dx = abs(ci[0] - cj[0])
@@ -133,11 +134,11 @@ def calc_velocitiesv2v(velocities, forces, step_size):
 
 
 @njit
-def simulate(positions, velocities, box_length, step_size, n_steps,
+def simulate(positions, velocities, cell_index, box_length, step_size, n_steps,
              sample_every, trajectory_every):
     """Run velocity Verlet and retain sampled observables and trajectory."""
     # Forces at the initial positions are needed for the first half-kick.
-    forces, potential_energy = compute_forces(positions, box_length)
+    forces, potential_energy = compute_forces(positions, cell_index, box_length)
     # Preallocate output arrays because allocation inside a JIT loop is costly.
     n_samples = n_steps // sample_every + 1
     n_frames = n_steps // trajectory_every + 1
@@ -172,12 +173,12 @@ def simulate(positions, velocities, box_length, step_size, n_steps,
         # Velocity Verlet sequence: half-kick, full drift, force update,
         # and a second half-kick using the force at the new positions.
         velocities = calc_velocitiesv2v(velocities, forces, step_size)
-        positions = calc_positionsv2v(positions, velocities, step_size,
+        positions, cell_index = calc_positionsv2v(positions, velocities, step_size,
                                       box_length)
-        forces, potential_energy = compute_forces(positions, box_length)
+        forces, potential_energy = compute_forces(positions, cell_index, box_length)
         velocities = calc_velocitiesv2v(velocities, forces, step_size)
 
-    return positions, velocities, measurements, trajectory
+    return positions, cell_index, velocities, measurements, trajectory
 
 
 def write_xyz(filename, trajectory, trajectory_every, step_size, element="Ar"):
@@ -265,11 +266,13 @@ def main():
         # A reproducible but different random velocity set is used for each run.
         rng = np.random.default_rng(args.seed + run_index)
         # C-contiguous float arrays give Numba efficient memory access.
-        positions = np.ascontiguousarray(init_positions(N, L), dtype=np.float64)
+        positions, cell_index = np.ascontiguousarray(init_positions(N, L), dtype=np.float64), np.ascontiguousarray((init_positions(N, L) / rcell).astype(np.int64), dtype=np.int64)
+        #positions = np.ascontiguousarray(init_positions(N, L), dtype=np.float64)
         velocities = np.ascontiguousarray(
             init_velocities(N, temperature, rng), dtype=np.float64)
-        positions, velocities, measurements, trajectory = simulate(
-            positions, velocities, L, dt, args.steps, args.sample_every,
+        
+        positions, cell_index, velocities, measurements, trajectory = simulate(
+            positions, velocities, cell_index, L, dt, args.steps, args.sample_every,
             args.trajectory_every)
         tag = f"T{temperature:g}".replace(".", "p")
         # Save numerical data separately from the figures for later analysis.

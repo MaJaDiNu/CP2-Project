@@ -18,7 +18,7 @@ from numba import njit
 # Lennard-Jones reduced units: sigma = epsilon = mass = k_B = 1.
 # Consequently, all lengths, energies, times, and temperatures below are
 # dimensionless reduced quantities.
-N = 125
+N = 1000
 L = 30.0
 rho = N / L**3
 dt = 0.005
@@ -63,22 +63,43 @@ ncell_y = int(L / rcell)
 ncell_z = int(L / rcell)
 
 
-@njit
-def cells_are_neighbours(ci, cj, ncell_x, ncell_y, ncell_z):
-    dx = abs(ci[0] - cj[0])
-    dy = abs(ci[1] - cj[1])
-    dz = abs(ci[2] - cj[2])
-
-    # periodic cell distance
-    dx = min(dx, ncell_x - dx)
-    dy = min(dy, ncell_y - dy)
-    dz = min(dz, ncell_z - dz)
-
-    return dx <= 1 and dy <= 1 and dz <= 1
-
 
 @njit
-def compute_forces(positions, cell_index, box_length):
+def build_cells(positions):
+    n_particles = positions.shape[0]
+    number_of_cells=ncell_x*ncell_y*ncell_z
+
+    number_of_part_in_cell = np.zeros(number_of_cells, dtype=np.int64)
+    """-1 so that empty does not equal 1, since also one particle in the cell means 1"""
+    particles_in_cell = -np.ones((number_of_cells, n_particles), dtype=np.int64)
+
+    """loop over all particles"""
+    for i in range(n_particles):
+        """compute cell index"""
+        cx=int(positions[i,0]/rcell)%ncell_x
+        cy=int(positions[i,1]/rcell)%ncell_y
+        cz=int(positions[i,2]/rcell)%ncell_z
+
+        """compute the cell number of the neighbouring cell"""
+        cell_number= cx+ncell_x*(cy+ncell_y*cz)
+
+        """check how many particles are already in this cell, to store particle i in the right place"""
+        part=number_of_part_in_cell[cell_number]
+
+        """store the particle number i in a 2D array with first index the cell_number and second the index of how many particles in this cell"""
+        particles_in_cell[cell_number,part]=i
+
+        """increase number of particles in this cell"""
+        number_of_part_in_cell[cell_number]+=1
+
+    return number_of_part_in_cell, particles_in_cell
+
+
+
+
+
+@njit
+def compute_forces(positions, box_length):
     """Return truncated-and-shifted LJ forces and potential energy."""
     # A separate force vector is accumulated for each particle.
     forces = np.zeros_like(positions)
@@ -86,29 +107,55 @@ def compute_forces(positions, cell_index, box_length):
     rij = np.empty(3, dtype=np.float64)
     n_particles = positions.shape[0]
     # j starts at i+1 so every particle pair is evaluated exactly once.
-    for i in range(n_particles):
-        for j in range(i + 1, n_particles):
-            if cells_are_neighbours(cell_index[i], cell_index[j],ncell_x, ncell_y, ncell_z):
-                for k in range(3):
-                    # Minimum-image displacement r_i-r_j.
-                    rij[k] = positions[i, k] - positions[j, k]
-                    rij[k] -= box_length * np.rint(rij[k] / box_length)
 
-                r2 = rij[0]**2 + rij[1]**2 + rij[2]**2
-                # Interactions outside the cutoff are neglected.
-                if r2 < rcut2:
-                    # Powers of 1/r^2 avoid repeated, expensive square roots.
-                    inv_r2 = 1.0 / r2
-                    inv_r6 = inv_r2**3
-                    inv_r12 = inv_r6**2
-                    force_factor = (48.0 * inv_r12 - 24.0 * inv_r6) * inv_r2
-                    # Newton's third law: equal and opposite pair forces.
-                    for k in range(3):
-                        pair_force = force_factor * rij[k]
-                        forces[i, k] += pair_force
-                        forces[j, k] -= pair_force
-                    # Shift the LJ potential so it goes continuously to zero at rcut.
-                    potential_energy += 4.0 * (inv_r12 - inv_r6) - Ecut
+
+    """from the positions build the cell"""
+    number_of_particles_in_cell, particles_in_cell = build_cells(positions)
+
+    for i in range(n_particles):
+        """compute cell index of particle i"""
+        cx=int(positions[i,0]/rcell)%ncell_x
+        cy=int(positions[i,1]/rcell)%ncell_y
+        cz=int(positions[i,2]/rcell)%ncell_z
+
+        """loop over all possible neighbour directions by looking at shifts dx,dy,dz"""
+        for dx in range(-1,2):
+            for dy in range(-1,2):
+                for dz in range(-1,2):
+                    """compute the neighbour cell index by applying the shifts"""
+                    ncx=(cx+dx)%ncell_x
+                    ncy=(cy+dy)%ncell_y
+                    ncz=(cz+dz)%ncell_z
+
+                    """compute the cell number of the neighbouring cell"""
+                    neighbour_cell_number= ncx+ncell_x*(ncy+ncell_y*ncz)
+
+                    """loop over all particles in this neighbouring cell"""
+                    for part in range(number_of_particles_in_cell[neighbour_cell_number]):
+                        """fetch the particle number j from this stored particle index"""
+                        j=particles_in_cell[neighbour_cell_number,part]
+                        
+                        if j>i:
+                            for k in range(3):
+                                # Minimum-image displacement r_i-r_j.
+                                rij[k] = positions[i, k] - positions[j, k]
+                                rij[k] -= box_length * np.rint(rij[k] / box_length)
+
+                            r2 = rij[0]**2 + rij[1]**2 + rij[2]**2
+                            # Interactions outside the cutoff are neglected.
+                            if r2 < rcut2:
+                                # Powers of 1/r^2 avoid repeated, expensive square roots.
+                                inv_r2 = 1.0 / r2
+                                inv_r6 = inv_r2**3
+                                inv_r12 = inv_r6**2
+                                force_factor = (48.0 * inv_r12 - 24.0 * inv_r6) * inv_r2
+                                # Newton's third law: equal and opposite pair forces.
+                                for k in range(3):
+                                    pair_force = force_factor * rij[k]
+                                    forces[i, k] += pair_force
+                                    forces[j, k] -= pair_force
+                                # Shift the LJ potential so it goes continuously to zero at rcut.
+                                potential_energy += 4.0 * (inv_r12 - inv_r6) - Ecut
     return forces, potential_energy
 
 
@@ -119,9 +166,7 @@ def calc_positionsv2v(positions, velocities, step_size, box_length):
     positions += velocities * step_size
     # Periodic boundaries map every coordinate back to [0, box_length).
     positions %= box_length
-    """calculate the cell index for each particle"""
-    cell_index = (positions / rcell).astype(np.int64)
-    return positions, cell_index
+    return positions
 
 
 @njit
@@ -137,7 +182,7 @@ def simulate(positions, velocities, box_length, step_size, n_steps,
              sample_every, trajectory_every):
     """Run velocity Verlet and retain sampled observables and trajectory."""
     # Forces at the initial positions are needed for the first half-kick.
-    forces, potential_energy = compute_forces(positions, box_length)
+    forces, potential_energy = compute_forces(positions,box_length)
     # Preallocate output arrays because allocation inside a JIT loop is costly.
     n_samples = n_steps // sample_every + 1
     n_frames = n_steps // trajectory_every + 1

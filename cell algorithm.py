@@ -19,11 +19,17 @@ from numba import njit
 # Consequently, all lengths, energies, times, and temperatures below are
 # dimensionless reduced quantities.
 N = 1000
-L = 30.0
-rho = N / L**3
-dt = 0.005
-# Pair interactions are evaluated only up to this distance.
+T_init = 0.8
+rho_average = 0.3
+
+L = (N / (2 * rho_average))**(1/3)
+Lx = 2 * L
+Ly = L
+Lz = L
+box = np.array([Lx, Ly, Lz], dtype=np.float64)
+
 rcut = 4.0
+dt = 0.005
 rcut2 = rcut**2
 # Subtracting the potential at the cutoff makes U(rcut) = 0.
 Ecut = 4.0 * (rcut**-12 - rcut**-6)
@@ -32,15 +38,18 @@ Ecut = 4.0 * (rcut**-12 - rcut**-6)
 #cell length
 rcell=5
 
-def init_positions(n_particles, box_length):
+def init_positions(n_particles, box):
     """Put particles on a cubic lattice without overlapping them."""
     # Use enough lattice sites to hold every particle.
     n_side = int(np.ceil(n_particles ** (1.0 / 3.0)))
-    spacing = box_length / n_side
     # Offset by half a lattice spacing so no particle lies on a box boundary.
-    coordinates = (np.arange(n_side) + 0.5) * spacing
+    x_coordinates=(np.arange(n_side)+0.5)*box[0]/n_side
+    y_coordinates=(np.arange(n_side)+0.5)*box[1]/n_side
+    z_coordinates=(np.arange(n_side)+0.5)*box[2]/n_side
+    
+    
     # meshgrid forms every possible combination of the x, y, and z coordinates.
-    grid = np.array(np.meshgrid(coordinates, coordinates, coordinates,
+    grid = np.array(np.meshgrid(x_coordinates, y_coordinates, z_coordinates,
                                 indexing="ij")).reshape(3, -1).T
     return grid[:n_particles].copy()
 
@@ -58,7 +67,7 @@ def init_velocities(n_particles, temperature, rng):
 
 
 
-ncell_x = int(L / rcell)
+ncell_x = int(Lx / rcell)
 ncell_y = int(L / rcell)
 ncell_z = int(L / rcell)
 
@@ -99,7 +108,7 @@ def build_cells(positions):
 
 
 @njit
-def compute_forces(positions, box_length):
+def compute_forces(positions, box):
     """Return truncated-and-shifted LJ forces and potential energy."""
     # A separate force vector is accumulated for each particle.
     forces = np.zeros_like(positions)
@@ -139,7 +148,7 @@ def compute_forces(positions, box_length):
                             for k in range(3):
                                 # Minimum-image displacement r_i-r_j.
                                 rij[k] = positions[i, k] - positions[j, k]
-                                rij[k] -= box_length * np.rint(rij[k] / box_length)
+                                rij[k] -= box[k] * np.rint(rij[k] / box[k])
 
                             r2 = rij[0]**2 + rij[1]**2 + rij[2]**2
                             # Interactions outside the cutoff are neglected.
@@ -160,12 +169,12 @@ def compute_forces(positions, box_length):
 
 
 @njit
-def calc_positionsv2v(positions, velocities, step_size, box_length):
+def calc_positionsv2v(positions, velocities, step_size, box):
     """Drift positions for one full step and wrap them into the box."""
     # After the first half-kick, these velocities represent the half time step.
     positions += velocities * step_size
     # Periodic boundaries map every coordinate back to [0, box_length).
-    positions %= box_length
+    positions %= box
     return positions
 
 
@@ -178,11 +187,11 @@ def calc_velocitiesv2v(velocities, forces, step_size):
 
 
 @njit
-def simulate(positions, velocities, box_length, step_size, n_steps,
+def simulate(positions, velocities, box, step_size, n_steps,
              sample_every, trajectory_every):
     """Run velocity Verlet and retain sampled observables and trajectory."""
     # Forces at the initial positions are needed for the first half-kick.
-    forces, potential_energy = compute_forces(positions,box_length)
+    forces, potential_energy = compute_forces(positions,box)
     # Preallocate output arrays because allocation inside a JIT loop is costly.
     n_samples = n_steps // sample_every + 1
     n_frames = n_steps // trajectory_every + 1
@@ -218,8 +227,8 @@ def simulate(positions, velocities, box_length, step_size, n_steps,
         # and a second half-kick using the force at the new positions.
         velocities = calc_velocitiesv2v(velocities, forces, step_size)
         positions = calc_positionsv2v(positions, velocities, step_size,
-                                      box_length)
-        forces, potential_energy = compute_forces(positions, box_length)
+                                      box)
+        forces, potential_energy = compute_forces(positions, box)
         velocities = calc_velocitiesv2v(velocities, forces, step_size)
 
     return positions, velocities, measurements, trajectory
@@ -300,7 +309,13 @@ def main():
     parser.add_argument("--results", type=Path,
                         default=Path(__file__).parent / "results")
     args = parser.parse_args()
-    # Create the output directory if this is the first run.
+
+    if args.sample_every <= 0:
+        raise ValueError("--sample-every must be a positive integer")
+
+    if args.trajectory_every <= 0:
+        raise ValueError("--trajectory-every must be a positive integer")
+
     args.results.mkdir(parents=True, exist_ok=True)
 
     all_measurements = {}
@@ -310,11 +325,11 @@ def main():
         # A reproducible but different random velocity set is used for each run.
         rng = np.random.default_rng(args.seed + run_index)
         # C-contiguous float arrays give Numba efficient memory access.
-        positions = np.ascontiguousarray(init_positions(N, L), dtype=np.float64)
+        positions = np.ascontiguousarray(init_positions(N, box), dtype=np.float64)
         velocities = np.ascontiguousarray(
             init_velocities(N, temperature, rng), dtype=np.float64)
         positions, velocities, measurements, trajectory = simulate(
-            positions, velocities, L, dt, args.steps, args.sample_every,
+            positions, velocities, box, dt, args.steps, args.sample_every,
             args.trajectory_every)
         tag = f"T{temperature:g}".replace(".", "p")
         # Save numerical data separately from the figures for later analysis.

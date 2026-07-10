@@ -18,22 +18,29 @@ from numba import njit
 # Lennard-Jones reduced units: sigma = epsilon = mass = k_B = 1.
 # Consequently, all lengths, energies, times, and temperatures below are
 # dimensionless reduced quantities.
-N = 1000
-L=10
-Lx = L
-Ly = L
-Lz = L
+N = 125
+
+Lx = 12.0
+Ly = 12.0
+Lz = 12.0
+
 box = np.array([Lx, Ly, Lz], dtype=np.float64)
 
 rcut = 2.5
-dt = 0.005
+dt = 0.01
 rcut2 = rcut**2
-# Subtracting the potential at the cutoff makes U(rcut) = 0.
+
 Ecut = 4.0 * (rcut**-12 - rcut**-6)
 
+# Maximum number of cells such that every cell is at least rcut wide.
+ncell_x = max(1, int(Lx / rcut))
+ncell_y = max(1, int(Ly / rcut))
+ncell_z = max(1, int(Lz / rcut))
 
-#cell length
-rcell=3.3
+# Actual cell dimensions.
+cell_x = Lx / ncell_x
+cell_y = Ly / ncell_y
+cell_z = Lz / ncell_z
 
 def init_positions(n_particles, box):
     """Put particles on a cubic lattice without overlapping them."""
@@ -64,9 +71,7 @@ def init_velocities(n_particles, temperature, rng):
 
 
 
-ncell_x = int(Lx / rcell)
-ncell_y = int(Ly / rcell)
-ncell_z = int(Lz / rcell)
+
 
 neighbor_offsets = (
     (0, 0, 0),
@@ -94,15 +99,15 @@ def build_cells(positions):
     number_of_cells=ncell_x*ncell_y*ncell_z
 
     number_of_part_in_cell = np.zeros(number_of_cells, dtype=np.int64)
-    """-1 so that empty does not equal 1, since also one particle in the cell means 1"""
+    """-1 so that empty does not equal 1, since for particle with number one it would also be 1"""
     particles_in_cell = -np.ones((number_of_cells, n_particles), dtype=np.int64)
 
     """loop over all particles"""
     for i in range(n_particles):
         """compute cell index"""
-        cx=int(positions[i,0]/rcell)%ncell_x
-        cy=int(positions[i,1]/rcell)%ncell_y
-        cz=int(positions[i,2]/rcell)%ncell_z
+        cx=int(positions[i,0]/cell_x)%ncell_x
+        cy=int(positions[i,1]/cell_y)%ncell_y
+        cz=int(positions[i,2]/cell_z)%ncell_z
 
         """compute the cell number of the neighbouring cell"""
         cell_number= cx+ncell_x*(cy+ncell_y*cz)
@@ -138,9 +143,9 @@ def compute_forces(positions, box):
 
     for i in range(n_particles):
         """compute cell index of particle i"""
-        cx=int(positions[i,0]/rcell)%ncell_x
-        cy=int(positions[i,1]/rcell)%ncell_y
-        cz=int(positions[i,2]/rcell)%ncell_z
+        cx=int(positions[i,0]/cell_x)%ncell_x
+        cy=int(positions[i,1]/cell_y)%ncell_y
+        cz=int(positions[i,2]/cell_z)%ncell_z
 
         """loop over all possible neighbour directions by looking at shifts dx,dy,dz"""
         for d in neighbor_offsets:
@@ -158,27 +163,32 @@ def compute_forces(positions, box):
                 """fetch the particle number j from this stored particle index"""
                 j=particles_in_cell[neighbour_cell_number,part]
                         
-                if j>i:
-                    for k in range(3):
-                        # Minimum-image displacement r_i-r_j.
-                        rij[k] = positions[i, k] - positions[j, k]
-                        rij[k] -= box[k] * np.rint(rij[k] / box[k])
+            
+                # In the same cell, avoid self-interaction and double counting.
+                if dx == 0 and dy == 0 and dz == 0:
+                    if j <= i:
+                        continue
 
-                        r2 = rij[0]**2 + rij[1]**2 + rij[2]**2
-                        # Interactions outside the cutoff are neglected.
-                        if r2 < rcut2:
-                            # Powers of 1/r^2 avoid repeated, expensive square roots.
-                            inv_r2 = 1.0 / r2
-                            inv_r6 = inv_r2**3
-                            inv_r12 = inv_r6**2
-                            force_factor = (48.0 * inv_r12 - 24.0 * inv_r6) * inv_r2
-                            # Newton's third law: equal and opposite pair forces.
-                            for k in range(3):
-                                pair_force = force_factor * rij[k]
-                                forces[i, k] += pair_force
-                                forces[j, k] -= pair_force
-                            # Shift the LJ potential so it goes continuously to zero at rcut.
-                            potential_energy += 4.0 * (inv_r12 - inv_r6) - Ecut
+                for k in range(3):
+                    # Minimum-image displacement r_i-r_j.
+                    rij[k] = positions[i, k] - positions[j, k]
+                    rij[k] -= box[k] * np.rint(rij[k] / box[k])
+
+                r2 = rij[0]**2 + rij[1]**2 + rij[2]**2
+                # Interactions outside the cutoff are neglected.
+                if r2 < rcut2:
+                    # Powers of 1/r^2 avoid repeated, expensive square roots.
+                    inv_r2 = 1.0 / r2
+                    inv_r6 = inv_r2**3
+                    inv_r12 = inv_r6**2
+                    force_factor = (48.0 * inv_r12 - 24.0 * inv_r6) * inv_r2
+                    # Newton's third law: equal and opposite pair forces.
+                    for k in range(3):
+                        pair_force = force_factor * rij[k]
+                        forces[i, k] += pair_force
+                        forces[j, k] -= pair_force
+                    # Shift the LJ potential so it goes continuously to zero at rcut.
+                    potential_energy += 4.0 * (inv_r12 - inv_r6) - Ecut
     return forces, potential_energy
 
 
@@ -256,7 +266,7 @@ def write_xyz(filename, trajectory, trajectory_every, step_size, element="Ar"):
             # XYZ frames begin with particle count followed by one comment line.
             handle.write(f"{positions.shape[0]}\n")
             time = frame_index * trajectory_every * step_size
-            handle.write(f"time = {time:.6f}; box = {L:.6f}\n")
+            handle.write(f"time = {time:.6f}; box = {Lx:.6f}\n")
             for x, y, z in positions:
                 handle.write(f"{element} {x:.6f} {y:.6f} {z:.6f}\n")
 

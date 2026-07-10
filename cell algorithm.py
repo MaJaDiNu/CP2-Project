@@ -19,16 +19,13 @@ from numba import njit
 # Consequently, all lengths, energies, times, and temperatures below are
 # dimensionless reduced quantities.
 N = 1000
-T_init = 0.8
-rho_average = 0.3
-
-L = (N / (2 * rho_average))**(1/3)
-Lx = 2 * L
+L=10
+Lx = L
 Ly = L
 Lz = L
 box = np.array([Lx, Ly, Lz], dtype=np.float64)
 
-rcut = 4.0
+rcut = 2.5
 dt = 0.005
 rcut2 = rcut**2
 # Subtracting the potential at the cutoff makes U(rcut) = 0.
@@ -36,7 +33,7 @@ Ecut = 4.0 * (rcut**-12 - rcut**-6)
 
 
 #cell length
-rcell=5
+rcell=3.3
 
 def init_positions(n_particles, box):
     """Put particles on a cubic lattice without overlapping them."""
@@ -68,10 +65,28 @@ def init_velocities(n_particles, temperature, rng):
 
 
 ncell_x = int(Lx / rcell)
-ncell_y = int(L / rcell)
-ncell_z = int(L / rcell)
+ncell_y = int(Ly / rcell)
+ncell_z = int(Lz / rcell)
 
+neighbor_offsets = (
+    (0, 0, 0),
 
+    (1, -1, -1),
+    (1, -1,  0),
+    (1, -1,  1),
+    (1,  0, -1),
+    (1,  0,  0),
+    (1,  0,  1),
+    (1,  1, -1),
+    (1,  1,  0),
+    (1,  1,  1),
+
+    (0, 1, -1),
+    (0, 1,  0),
+    (0, 1,  1),
+
+    (0, 0, 1),
+)
 
 @njit
 def build_cells(positions):
@@ -128,43 +143,42 @@ def compute_forces(positions, box):
         cz=int(positions[i,2]/rcell)%ncell_z
 
         """loop over all possible neighbour directions by looking at shifts dx,dy,dz"""
-        for dx in range(-1,2):
-            for dy in range(-1,2):
-                for dz in range(-1,2):
-                    """compute the neighbour cell index by applying the shifts"""
-                    ncx=(cx+dx)%ncell_x
-                    ncy=(cy+dy)%ncell_y
-                    ncz=(cz+dz)%ncell_z
+        for d in neighbor_offsets:
+            dx, dy, dz = d
+            """compute the neighbour cell index by applying the shifts"""
+            ncx=(cx+dx)%ncell_x
+            ncy=(cy+dy)%ncell_y
+            ncz=(cz+dz)%ncell_z
 
-                    """compute the cell number of the neighbouring cell"""
-                    neighbour_cell_number= ncx+ncell_x*(ncy+ncell_y*ncz)
+            """compute the cell number of the neighbouring cell"""
+            neighbour_cell_number= ncx+ncell_x*(ncy+ncell_y*ncz)
 
-                    """loop over all particles in this neighbouring cell"""
-                    for part in range(number_of_particles_in_cell[neighbour_cell_number]):
-                        """fetch the particle number j from this stored particle index"""
-                        j=particles_in_cell[neighbour_cell_number,part]
+            """loop over all particles in this neighbouring cell"""
+            for part in range(number_of_particles_in_cell[neighbour_cell_number]):
+                """fetch the particle number j from this stored particle index"""
+                j=particles_in_cell[neighbour_cell_number,part]
                         
-                        if j>i:
-                            for k in range(3):
-                                # Minimum-image displacement r_i-r_j.
-                                rij[k] = positions[i, k] - positions[j, k]
-                                rij[k] -= box[k] * np.rint(rij[k] / box[k])
+                if j>i:
+                    for k in range(3):
+                        # Minimum-image displacement r_i-r_j.
+                        rij[k] = positions[i, k] - positions[j, k]
+                        rij[k] -= box[k] * np.rint(rij[k] / box[k])
 
-                            r2 = rij[0]**2 + rij[1]**2 + rij[2]**2
-                            # Interactions outside the cutoff are neglected.
-                            if r2 < rcut2:
-                                # Powers of 1/r^2 avoid repeated, expensive square roots.
-                                inv_r2 = 1.0 / r2
-                                inv_r6 = inv_r2**3
-                                inv_r12 = inv_r6**2
-                                force_factor = (48.0 * inv_r12 - 24.0 * inv_r6) * inv_r2
-                                # Newton's third law: equal and opposite pair forces.
-                                for k in range(3):
-                                    pair_force = force_factor * rij[k]
-                                    forces[i, k] += pair_force
-                                    forces[j, k] -= pair_force
-                                # Shift the LJ potential so it goes continuously to zero at rcut.
-                                potential_energy += 4.0 * (inv_r12 - inv_r6) - Ecut
+                        r2 = rij[0]**2 + rij[1]**2 + rij[2]**2
+                        # Interactions outside the cutoff are neglected.
+                        if r2 < rcut2:
+                            # Powers of 1/r^2 avoid repeated, expensive square roots.
+                            inv_r2 = 1.0 / r2
+                            inv_r6 = inv_r2**3
+                            inv_r12 = inv_r6**2
+                            force_factor = (48.0 * inv_r12 - 24.0 * inv_r6) * inv_r2
+                            # Newton's third law: equal and opposite pair forces.
+                            for k in range(3):
+                                pair_force = force_factor * rij[k]
+                                forces[i, k] += pair_force
+                                forces[j, k] -= pair_force
+                            # Shift the LJ potential so it goes continuously to zero at rcut.
+                            potential_energy += 4.0 * (inv_r12 - inv_r6) - Ecut
     return forces, potential_energy
 
 
@@ -304,7 +318,7 @@ def main():
     parser.add_argument("--sample-every", type=int, default=100)
     parser.add_argument("--trajectory-every", type=int, default=500)
     parser.add_argument("--temperatures", type=float, nargs="+",
-                        default=[0.1, 1.5])
+                        default=[0.8])
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--results", type=Path,
                         default=Path(__file__).parent / "results")

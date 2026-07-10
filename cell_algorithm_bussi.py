@@ -20,14 +20,14 @@ from numba import njit
 # dimensionless reduced quantities.
 N = 125
 
-Lx = 30.0
-Ly = 30.0
-Lz = 30.0
+Lx = 12.0
+Ly = 12.0
+Lz = 12.0
 
 box = np.array([Lx, Ly, Lz], dtype=np.float64)
 
 rcut = 2.5
-dt = 0.005
+dt = 0.01
 rcut2 = rcut**2
 
 Ecut = 4.0 * (rcut**-12 - rcut**-6)
@@ -377,7 +377,7 @@ def main():
     parser.add_argument("--temperatures", type=float, nargs="+",
                         default=[0.8])
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--thermostat-tau", type=float, default=0.0,
+    parser.add_argument("--thermostat-tau", type=float, default=1.0,
                         help="Bussi thermostat relaxation time; <= 0 disables it")
     parser.add_argument("--results", type=Path,
                         default=Path(__file__).parent / "results")

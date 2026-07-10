@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from numba import njit
+import time
 
 
 # Lennard-Jones reduced units: sigma = epsilon = mass = k_B = 1.
@@ -369,19 +370,37 @@ def plot_measurements(all_measurements, output_dir):
 
 
 def main():
+    # Start the timer before argument parsing so the reported runtime includes
+    # setup, Numba compilation, simulation, file writing, and plotting.
+    start_time = time.perf_counter()
+
     # Command-line options allow shorter tests without editing the source code.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--steps", type=int, default=100_000)
     parser.add_argument("--sample-every", type=int, default=100)
     parser.add_argument("--trajectory-every", type=int, default=500)
-    parser.add_argument("--temperatures", type=float, nargs="+",
-                        default=[0.8])
+    parser.add_argument(
+        "--temperatures",
+        type=float,
+        nargs="+",
+        default=[0.8]
+    )
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--thermostat-tau", type=float, default=1.0,
-                        help="Bussi thermostat relaxation time; <= 0 disables it")
-    parser.add_argument("--results", type=Path,
-                        default=Path(__file__).parent / "results")
+    parser.add_argument(
+        "--thermostat-tau",
+        type=float,
+        default=0.0,
+        help="Bussi thermostat relaxation time; <= 0 disables it"
+    )
+    parser.add_argument(
+        "--results",
+        type=Path,
+        default=Path(__file__).parent / "results"
+    )
     args = parser.parse_args()
+
+    if args.steps < 0:
+        raise ValueError("--steps must be non-negative")
 
     if args.sample_every <= 0:
         raise ValueError("--sample-every must be a positive integer")
@@ -392,32 +411,95 @@ def main():
     args.results.mkdir(parents=True, exist_ok=True)
 
     all_measurements = {}
-    header = "step time temperature total_energy kinetic_energy potential_energy Px Py Pz"
+    header = (
+        "step time temperature total_energy kinetic_energy "
+        "potential_energy Px Py Pz"
+    )
+
     for run_index, temperature in enumerate(args.temperatures):
-        print(f"Running T_target={temperature:g} for {args.steps} steps ...")
+        print(
+            f"Running T_target={temperature:g} "
+            f"for {args.steps} steps ...",
+            flush=True
+        )
+
         # A reproducible but different random velocity set is used for each run.
         rng = np.random.default_rng(args.seed + run_index)
+
         # C-contiguous float arrays give Numba efficient memory access.
-        positions = np.ascontiguousarray(init_positions(N, box), dtype=np.float64)
+        positions = np.ascontiguousarray(
+            init_positions(N, box),
+            dtype=np.float64
+        )
         velocities = np.ascontiguousarray(
-            init_velocities(N, temperature, rng), dtype=np.float64)
+            init_velocities(N, temperature, rng),
+            dtype=np.float64
+        )
+
         positions, velocities, measurements, trajectory = simulate(
-            positions, velocities, box, dt, args.steps, args.sample_every,
-            args.trajectory_every, temperature, args.thermostat_tau)
+            positions,
+            velocities,
+            box,
+            dt,
+            args.steps,
+            args.sample_every,
+            args.trajectory_every,
+            temperature,
+            args.thermostat_tau
+        )
+
         tag = f"T{temperature:g}".replace(".", "p")
+
         # Save numerical data separately from the figures for later analysis.
-        np.savetxt(args.results / f"measurements_{tag}.txt", measurements,
-                   header=header)
-        write_xyz(args.results / f"trajectory_{tag}.xyz", trajectory,
-                  args.trajectory_every, dt)
+        np.savetxt(
+            args.results / f"measurements_{tag}.txt",
+            measurements,
+            header=header
+        )
+
+        write_xyz(
+            args.results / f"trajectory_{tag}.xyz",
+            trajectory,
+            args.trajectory_every,
+            dt
+        )
+
         all_measurements[temperature] = measurements
-        drift = np.max(np.abs(measurements[:, 3] - measurements[0, 3]))
-        max_momentum = np.max(np.linalg.norm(measurements[:, 6:9], axis=1))
-        print(f"  max |E-E0|={drift:.3e}; max |P|={max_momentum:.3e}")
+
+        drift = np.max(
+            np.abs(measurements[:, 3] - measurements[0, 3])
+        )
+        max_momentum = np.max(
+            np.linalg.norm(measurements[:, 6:9], axis=1)
+        )
+
+        print(
+            f"  max |E-E0|={drift:.3e}; "
+            f"max |P|={max_momentum:.3e}",
+            flush=True
+        )
 
     # Compare all requested temperatures on common axes.
     plot_measurements(all_measurements, args.results)
-    print(f"Results written to {args.results.resolve()}")
+
+    print(
+        f"Results written to {args.results.resolve()}",
+        flush=True
+    )
+
+    # Stop the timer only after all simulations, saving, and plotting are done.
+    runtime = time.perf_counter() - start_time
+
+    hours = int(runtime // 3600)
+    minutes = int((runtime % 3600) // 60)
+    seconds = runtime % 60
+
+    print(
+        f"Total runtime: "
+        f"{hours:02d}:{minutes:02d}:{seconds:06.3f} "
+        f"({runtime:.3f} s)",
+        flush=True
+    )
 
 
 if __name__ == "__main__":

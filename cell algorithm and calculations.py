@@ -18,10 +18,6 @@ plots U(T) for three block sizes.
 from pathlib import Path
 import argparse
 
-import matplotlib
-# Use a non-interactive backend so figures can also be created without a GUI.
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 from numba import njit
 import time
@@ -471,371 +467,6 @@ def write_xyz(filename, trajectory, trajectory_every, step_size, element="Ar"):
                 handle.write(f"{element} {x:.6f} {y:.6f} {z:.6f}\n")
 
 
-def plot_measurements(all_measurements, output_dir):
-    # Fixed colours make the same initial temperature recognizable in all plots.
-    colors = {0.1: "tab:blue", 1.5: "tab:orange"}
-
-    # The first figure directly tests NVE energy and momentum conservation.
-    fig, axes = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
-    for temperature, values in all_measurements.items():
-        label = rf"$T_0={temperature:g}$"
-        color = colors.get(temperature)
-        energy0 = values[0, 3]
-        # Plot the energy change rather than its large absolute value.
-        axes[0].plot(values[:, 1], values[:, 3] - energy0,
-                     label=label, color=color, linewidth=1)
-        momentum_norm = np.linalg.norm(values[:, 6:9], axis=1)
-        axes[1].semilogy(values[:, 1], np.maximum(momentum_norm, 1e-18),
-                        label=label, color=color, linewidth=1)
-    axes[0].set_ylabel(r"$E(t)-E(0)$")
-    axes[0].set_title("Conservation checks")
-    axes[0].grid(alpha=0.25)
-    axes[0].legend()
-    axes[1].set_xlabel("time")
-    axes[1].set_ylabel(r"$|\mathbf{P}|$")
-    axes[1].grid(alpha=0.25)
-    axes[1].legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / "conservation.png", dpi=180)
-    plt.close(fig)
-
-    # The second figure reveals heating/cooling and changes in particle binding.
-    fig, axes = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
-    for temperature, values in all_measurements.items():
-        label = rf"$T_0={temperature:g}$"
-        color = colors.get(temperature)
-        axes[0].plot(values[:, 1], values[:, 2], label=label,
-                     color=color, linewidth=1)
-        axes[1].plot(values[:, 1], values[:, 5] / N, label=label,
-                     color=color, linewidth=1)
-    axes[0].set_ylabel("temperature")
-    axes[0].set_title("Thermodynamic time series")
-    axes[0].grid(alpha=0.25)
-    axes[0].legend()
-    axes[1].set_xlabel("time")
-    axes[1].set_ylabel("potential energy / particle")
-    axes[1].grid(alpha=0.25)
-    axes[1].legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / "thermodynamics.png", dpi=180)
-    plt.close(fig)
-
-
-
-def plot_local_density_histograms(all_histograms, density_min, density_max,
-                                  output_dir, partition_index=1):
-    """Plot the normalized local-density distribution for every temperature."""
-    if not all_histograms:
-        return
-
-    first_histogram = next(iter(all_histograms.values()))
-    n_bins = first_histogram.shape[1]
-    edges = np.linspace(density_min, density_max, n_bins + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    bin_width = edges[1] - edges[0]
-
-    partition_index = min(partition_index, first_histogram.shape[0] - 1)
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for temperature in sorted(all_histograms):
-        counts = all_histograms[temperature][partition_index].astype(float)
-        normalization = np.sum(counts) * bin_width
-        probability_density = counts / normalization if normalization > 0.0 else counts
-        ax.plot(centers, probability_density, label=rf"$T={temperature:g}$")
-
-    nx, ny, nz = block_divisions[partition_index]
-    ax.set_xlabel(r"local density $\rho_{\mathrm{loc}}$")
-    ax.set_ylabel(r"$P(\rho_{\mathrm{loc}})$")
-    ax.set_title(f"Local-density distributions ({nx} x {ny} x {nz} blocks)")
-    ax.grid(alpha=0.25)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / "local_density_histograms.png", dpi=180)
-    plt.close(fig)
-
-
-
-def plot_local_density_vs_temperature(all_histograms, density_min, density_max,
-                                      output_dir, partition_index=1):
-    """Plot P(rho_local | T) as a temperature-density heat map.
-
-    Each row is the normalized local-density distribution at one target
-    temperature. This is the direct local-density-distribution-versus-
-    temperature plot requested in the project.
-    """
-    if not all_histograms:
-        return
-
-    temperatures = np.array(sorted(all_histograms), dtype=float)
-    first_histogram = next(iter(all_histograms.values()))
-    n_bins = first_histogram.shape[1]
-    partition_index = min(partition_index, first_histogram.shape[0] - 1)
-
-    edges = np.linspace(density_min, density_max, n_bins + 1)
-    bin_width = edges[1] - edges[0]
-
-    probability = np.zeros((temperatures.size, n_bins), dtype=float)
-    for i, temperature in enumerate(temperatures):
-        counts = all_histograms[temperature][partition_index].astype(float)
-        normalization = np.sum(counts) * bin_width
-        if normalization > 0.0:
-            probability[i] = counts / normalization
-
-    # Build temperature-bin edges so each simulated temperature is centred
-    # on its heat-map row, including nonuniform temperature sweeps.
-    if temperatures.size == 1:
-        temperature_edges = np.array([temperatures[0] - 0.5,
-                                      temperatures[0] + 0.5])
-    else:
-        temperature_edges = np.empty(temperatures.size + 1)
-        temperature_edges[1:-1] = 0.5 * (temperatures[:-1] + temperatures[1:])
-        temperature_edges[0] = temperatures[0] - 0.5 * (temperatures[1] - temperatures[0])
-        temperature_edges[-1] = temperatures[-1] + 0.5 * (temperatures[-1] - temperatures[-2])
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    mesh = ax.pcolormesh(edges, temperature_edges, probability, shading="auto")
-    fig.colorbar(mesh, ax=ax, label=r"$P(\rho_{\mathrm{loc}}|T)$")
-
-    nx, ny, nz = block_divisions[partition_index]
-    ax.set_xlabel(r"local density $\rho_{\mathrm{loc}}$")
-    ax.set_ylabel("temperature")
-    ax.set_title(
-        f"Local-density distribution vs temperature "
-        f"({nx} x {ny} x {nz} blocks)"
-    )
-    fig.tight_layout()
-    fig.savefig(output_dir / "local_density_vs_temperature.png", dpi=180)
-    plt.close(fig)
-
-    # Save the complete temperature-density probability matrix.
-    table = np.column_stack((temperatures, probability))
-    rho_centers = 0.5 * (edges[:-1] + edges[1:])
-    header = "temperature " + " ".join(
-        f"P_rho_{rho:.8g}" for rho in rho_centers
-    )
-    np.savetxt(output_dir / "local_density_vs_temperature.txt",
-               table, header=header)
-
-
-
-def plot_phase_boundary(all_histograms, density_min, density_max,
-                        output_dir, partition_index=1):
-    """Estimate gas and liquid coexistence densities from the two histogram peaks.
-
-    Below the critical point the local-density distribution is bimodal.  The
-    lower-density maximum estimates rho_g and the higher-density maximum
-    estimates rho_l.  Temperatures without two resolved peaks are omitted.
-    """
-    if not all_histograms:
-        return
-
-    first_histogram = next(iter(all_histograms.values()))
-    partition_index = min(partition_index, first_histogram.shape[0] - 1)
-    n_bins = first_histogram.shape[1]
-    edges = np.linspace(density_min, density_max, n_bins + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-
-    temperatures_out = []
-    gas_densities = []
-    liquid_densities = []
-
-    for temperature in sorted(all_histograms):
-        counts = all_histograms[temperature][partition_index].astype(float)
-        if np.sum(counts) == 0.0:
-            continue
-
-        # Light smoothing suppresses single-bin counting noise without moving
-        # the broad gas and liquid maxima appreciably.
-        smooth = np.convolve(counts, np.ones(5) / 5.0, mode="same")
-        mean_density = N / (Lx * Ly * Lz)
-        split = np.searchsorted(centers, mean_density)
-        if split < 3 or split > n_bins - 3:
-            continue
-
-        gas_index = int(np.argmax(smooth[:split]))
-        liquid_index = split + int(np.argmax(smooth[split:]))
-
-        # Require a genuine separation between the two maxima.
-        if centers[liquid_index] - centers[gas_index] < 3.0 * (edges[1] - edges[0]):
-            continue
-
-        temperatures_out.append(temperature)
-        gas_densities.append(centers[gas_index])
-        liquid_densities.append(centers[liquid_index])
-
-    if not temperatures_out:
-        return
-
-    temperatures_out = np.asarray(temperatures_out)
-    gas_densities = np.asarray(gas_densities)
-    liquid_densities = np.asarray(liquid_densities)
-
-    fig, ax = plt.subplots(figsize=(7, 6))
-    ax.plot(gas_densities, temperatures_out, "o-", label="gas")
-    ax.plot(liquid_densities, temperatures_out, "o-", label="liquid")
-    diameter = 0.5 * (gas_densities + liquid_densities)
-    if temperatures_out.size >= 2:
-        coefficients = np.polyfit(temperatures_out, diameter, 1)
-        temperature_line = np.linspace(temperatures_out.min(),
-                                       temperatures_out.max(), 100)
-        density_line = np.polyval(coefficients, temperature_line)
-        ax.plot(density_line, temperature_line, "--",
-                label="rectilinear diameter")
-    ax.set_xlabel(r"density $\rho$")
-    ax.set_ylabel("temperature")
-    ax.set_title("Gas-liquid coexistence curve")
-    ax.grid(alpha=0.25)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / "phase_boundary_fig4.png", dpi=180)
-    plt.close(fig)
-
-    np.savetxt(
-        output_dir / "phase_boundary_fig4.txt",
-        np.column_stack((temperatures_out, gas_densities, liquid_densities)),
-        header="temperature rho_g rho_l",
-    )
-
-
-def estimate_binder_crossings(temperatures, binder_values):
-    """Find pairwise crossings by linear interpolation between temperatures."""
-    crossings = []
-    n_curves = binder_values.shape[1]
-
-    for a in range(n_curves):
-        for b in range(a + 1, n_curves):
-            difference = binder_values[:, a] - binder_values[:, b]
-
-            for i in range(len(temperatures) - 1):
-                d0 = difference[i]
-                d1 = difference[i + 1]
-
-                if not np.isfinite(d0) or not np.isfinite(d1):
-                    continue
-
-                if d0 == 0.0:
-                    crossings.append(temperatures[i])
-                elif d0 * d1 < 0.0:
-                    t0 = temperatures[i]
-                    t1 = temperatures[i + 1]
-                    t_cross = t0 - d0 * (t1 - t0) / (d1 - d0)
-                    crossings.append(t_cross)
-
-    return np.array(crossings)
-
-
-def plot_binder(all_binder, output_dir):
-    """Plot Binder parameters and report their approximate crossing."""
-    if not all_binder:
-        return None
-
-    temperatures = np.array(sorted(all_binder), dtype=float)
-    binder_values = np.array([all_binder[T] for T in temperatures])
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for p in range(block_divisions.shape[0]):
-        nx, ny, nz = block_divisions[p]
-        ax.plot(
-            temperatures,
-            binder_values[:, p],
-            "o-",
-            label=f"{nx} x {ny} x {nz} blocks",
-        )
-
-    crossings = estimate_binder_crossings(temperatures, binder_values)
-    critical_temperature = None
-    if crossings.size > 0:
-        critical_temperature = float(np.mean(crossings))
-        ax.axvline(
-            critical_temperature,
-            linestyle="--",
-            label=rf"estimated $T_c={critical_temperature:.4f}$",
-        )
-
-    ax.set_xlabel("temperature")
-    ax.set_ylabel(r"$U=\langle m_4\rangle/\langle m_2\rangle^2$")
-    ax.set_title("Watanabe block-density Binder parameter")
-    ax.grid(alpha=0.25)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / "binder_parameter_vs_temperature.png", dpi=180)
-    plt.close(fig)
-
-    header = "temperature " + " ".join(
-        f"U_{nx}x{ny}x{nz}" for nx, ny, nz in block_divisions
-    )
-    np.savetxt(
-        output_dir / "binder_parameter_vs_temperature.txt",
-        np.column_stack((temperatures, binder_values)),
-        header=header,
-    )
-
-    return critical_temperature
-
-
-
-def plot_surface_tension(all_surface_tension, output_dir):
-    """Plot mean surface tension versus target temperature."""
-    if not all_surface_tension:
-        return
-
-    temperatures = np.array(sorted(all_surface_tension), dtype=float)
-    gamma = np.array(
-        [all_surface_tension[T][0] for T in temperatures],
-        dtype=float,
-    )
-    gamma_error = np.array(
-        [all_surface_tension[T][1] for T in temperatures],
-        dtype=float,
-    )
-
-    # Watanabe Fig. 7 uses the reduced distance from the critical point.
-    critical_temperature = 1.10
-    epsilon = (critical_temperature - temperatures) / critical_temperature
-    mask = (epsilon > 0.0) & (gamma > 0.0) & np.isfinite(gamma)
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.errorbar(
-        epsilon[mask],
-        gamma[mask],
-        yerr=gamma_error[mask],
-        fmt="o",
-        capsize=3,
-    )
-    if np.count_nonzero(mask) >= 2:
-        slope, intercept = np.polyfit(
-            np.log(epsilon[mask]), np.log(gamma[mask]), 1
-        )
-        epsilon_fit = np.logspace(
-            np.log10(np.min(epsilon[mask])),
-            np.log10(np.max(epsilon[mask])), 100
-        )
-        ax.plot(
-            epsilon_fit, np.exp(intercept) * epsilon_fit**slope,
-            "--", label=rf"fit: $2\nu={slope:.3f}$"
-        )
-        ax.legend()
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel(r"reduced temperature $\epsilon=(T_c-T)/T_c$")
-    ax.set_ylabel(r"surface tension $\gamma$")
-    ax.set_title(
-        r"Surface tension from Watanabe Eq. (4), interface normal to $x$"
-    )
-    ax.grid(alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(
-        output_dir / "surface_tension_vs_temperature.png",
-        dpi=180,
-    )
-    plt.close(fig)
-
-    np.savetxt(
-        output_dir / "surface_tension_vs_temperature.txt",
-        np.column_stack((temperatures, gamma, gamma_error)),
-        header="temperature gamma gamma_standard_error",
-    )
-
 def main():
     # Start the timer before argument parsing so the reported runtime includes
     # setup, Numba compilation, simulation, file writing, and plotting.
@@ -1044,41 +675,51 @@ def main():
             flush=True
         )
 
-    # Compare all requested temperatures on common axes.
-    plot_measurements(all_measurements, args.results)
-    plot_local_density_histograms(
-        all_density_histograms,
-        args.density_min,
-        args.density_max,
-        args.results,
+    # Save temperature-sweep summary data for the separate plotting notebook.
+    temperatures = np.array(sorted(all_binder), dtype=float)
+    binder_values = np.array([all_binder[T] for T in temperatures])
+    binder_header = "temperature " + " ".join(
+        f"U_{nx}x{ny}x{nz}" for nx, ny, nz in block_divisions
     )
-    plot_local_density_vs_temperature(
-        all_density_histograms,
-        args.density_min,
-        args.density_max,
-        args.results,
+    np.savetxt(
+        args.results / "binder_parameter_vs_temperature.txt",
+        np.column_stack((temperatures, binder_values)),
+        header=binder_header,
     )
-    plot_phase_boundary(
-        all_density_histograms,
-        args.density_min,
-        args.density_max,
-        args.results,
-    )
-    critical_temperature = plot_binder(all_binder, args.results)
-    plot_surface_tension(all_surface_tension, args.results)
 
-    if critical_temperature is None:
-        print(
-            "No Binder crossing found. Use several closely spaced "
-            "temperatures around the critical region.",
-            flush=True,
-        )
-    else:
-        print(
-            f"Estimated Binder-parameter crossing temperature: "
-            f"{critical_temperature:.6f}",
-            flush=True,
-        )
+    gamma = np.array(
+        [all_surface_tension[T][0] for T in temperatures], dtype=float
+    )
+    gamma_error = np.array(
+        [all_surface_tension[T][1] for T in temperatures], dtype=float
+    )
+    np.savetxt(
+        args.results / "surface_tension_vs_temperature.txt",
+        np.column_stack((temperatures, gamma, gamma_error)),
+        header="temperature gamma gamma_standard_error",
+    )
+
+    # Store simulation and analysis settings in one machine-readable file.
+    # The plotting notebook loads this file first and then discovers all
+    # temperature-dependent text files in the same results directory.
+    np.savez(
+        args.results / "simulation_metadata.npz",
+        temperatures=temperatures,
+        block_divisions=block_divisions,
+        density_min=float(args.density_min),
+        density_max=float(args.density_max),
+        density_bins=int(args.density_bins),
+        N=int(N),
+        box=box,
+        dt=float(dt),
+        steps=int(args.steps),
+        sample_every=int(args.sample_every),
+        trajectory_every=int(args.trajectory_every),
+        equilibration_steps=int(args.equilibration_steps),
+        density_every=int(args.density_every),
+        thermostat_tau=float(args.thermostat_tau),
+        seed=int(args.seed),
+    )
 
     print(
         f"Results written to {args.results.resolve()}",

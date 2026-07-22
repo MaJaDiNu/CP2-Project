@@ -18,9 +18,9 @@ import time
 N = 1000
 
 # Elongated coexistence box: the x-side is doubled.
-Lx = 24.0
-Ly = 12.0
-Lz = 12.0
+Lx = 24
+Ly = 12
+Lz = 12
 
 box = np.array([Lx, Ly, Lz], dtype=np.float64)
 
@@ -262,6 +262,64 @@ def compute_forces(positions, box):
     surface_tension = surface_tension_pair_sum / (2.0 * box[1] * box[2])
     return forces, potential_energy, surface_tension
 
+#old function for performance test
+@njit
+def compute_forces2(positions, box):
+    """Return LJ forces, potential energy, and the Eq. (4) from Watanabe surface tension.
+    For surface tension was considered, that x-side is doubled and not z-side like in the paper:
+    2 gamma Ly Lz = sum_{i<j} [(y_ij^2 + z_ij^2 - 2 x_ij^2)/(2 r_ij)] V'(r_ij).
+    """
+    # A separate force vector is accumulated for each particle.
+    forces = np.zeros_like(positions)
+    potential_energy = 0.0
+
+    # Right-hand-side pair sum for the surface tension formula.
+    surface_tension_pair_sum = 0.0
+    rij = np.empty(3, dtype=np.float64)
+    n_particles = positions.shape[0]
+
+    for i in range(n_particles):
+        for j in range(i+1,n_particles):
+            for k in range(3):
+                # Minimum-image displacement r_i-r_j.
+                rij[k] = positions[i, k] - positions[j, k]
+                rij[k] -= box[k] * np.rint(rij[k] / box[k])
+
+            r2 = rij[0]**2 + rij[1]**2 + rij[2]**2
+            # Interactions outside the cutoff are neglected.
+            if 0.0 < r2 < rcut2:
+                inv_r2 = 1.0 / r2
+                inv_r6 = inv_r2**3
+                inv_r12 = inv_r6**2
+                force_factor = (48.0 * inv_r12 - 24.0 * inv_r6) * inv_r2
+                # Newton's third law: equal and opposite pair forces.
+                for k in range(3):
+                    pair_force = force_factor * rij[k]
+                    forces[i, k] += pair_force
+                    forces[j, k] -= pair_force
+
+                # Shift the LJ potential so it goes continuously to zero at rcut.
+                potential_energy += 4.0 * (inv_r12 - inv_r6) - Ecut
+
+                # Calculation of the V'(r).
+                r = np.sqrt(r2)
+                dV_dr = 24.0 * (inv_r6 - 2.0 * inv_r12) / r
+                # Interface normal x and area Ly*Lz. surface tension as difference of tangential and normal pressure 
+                surface_tension_pair_sum += (
+                    (
+                        rij[1] * rij[1]
+                        + rij[2] * rij[2]
+                        - 2.0 * rij[0] * rij[0]
+                    )
+                    * dV_dr
+                    / (2.0 * r)
+                )
+
+    # Periodic boundaries produce two interfaces, hence the factor 2.
+    surface_tension = surface_tension_pair_sum / (2.0 * box[1] * box[2])
+    return forces, potential_energy, surface_tension
+
+
 
 @njit
 def calc_positionsv2v(positions, velocities, step_size, box):
@@ -329,7 +387,7 @@ def simulate(positions, velocities, box, step_size, n_steps,
              density_min, density_max, density_bins):
     """Run velocity rescale and retain sampled observables and trajectory."""
     # Forces at the initial positions are needed for the first integration step.
-    forces, potential_energy, surface_tension = compute_forces(positions,box)
+    forces, potential_energy, surface_tension = compute_forces2(positions,box)
     # Arrays to store the data.
     n_samples = n_steps // sample_every + 1
     n_frames = n_steps // trajectory_every + 1
@@ -407,7 +465,7 @@ def simulate(positions, velocities, box, step_size, n_steps,
         velocities = calc_velocitiesv2v(velocities, forces, step_size)
         positions = calc_positionsv2v(positions, velocities, step_size,
                                       box)
-        forces, potential_energy, surface_tension = compute_forces(positions, box)
+        forces, potential_energy, surface_tension = compute_forces2(positions, box)
         velocities = calc_velocitiesv2v(velocities, forces, step_size)
 
         # If the system is still equilibrating, apply the Bussi thermostat to rescale the velocities.
@@ -454,13 +512,13 @@ def main():
         "--temperatures",
         type=float,
         nargs="+",
-        default=[0.74, 0.80, 0.86, 0.90, 0.94, 0.98, 1.00, 1.02, 1.04, 1.06, 1.08, 1.09, 1.10, 1.11, 1.12, 1.13, 1.14, 1.15, 1.16, 1.17, 1.18, 1.19, 1.20]
+        default=[1]
     )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument(
         "--thermostat-tau",
         type=float,
-        default=1.0,
+        default=0,
         help="Bussi thermostat relaxation time; <= 0 disables it"
     )
     parser.add_argument(

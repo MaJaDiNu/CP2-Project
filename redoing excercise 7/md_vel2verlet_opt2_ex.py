@@ -219,11 +219,11 @@ def plot_measurements(all_measurements, output_dir):
 def main():
     # Command-line options allow shorter tests without editing the source code.
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--steps", type=int, default=100_000)
+    parser.add_argument("--steps", type=int, default=200_000)
     parser.add_argument("--sample-every", type=int, default=100)
     parser.add_argument("--trajectory-every", type=int, default=500)
     parser.add_argument("--temperatures", type=float, nargs="+",
-                        default=[0.1, 1.5])
+                        default=[1])
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--results", type=Path,
                         default=Path(__file__).parent / "results")

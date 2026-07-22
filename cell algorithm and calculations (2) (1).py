@@ -244,11 +244,10 @@ def compute_forces(positions, box):
                     potential_energy += 4.0 * (inv_r12 - inv_r6) - Ecut
 
                     # Calculation of the V'(r).
-                    # The constant energy shift does not change V'(r).
                     r = np.sqrt(r2)
                     dV_dr = 24.0 * (inv_r6 - 2.0 * inv_r12) / r
 
-                    # Interface normal x and area Ly*Lz.
+                    # Interface normal x and area Ly*Lz. surface tension as difference of tangential and normal pressure 
                     surface_tension_pair_sum += (
                         (
                             rij[1] * rij[1]
@@ -276,7 +275,7 @@ def calc_positionsv2v(positions, velocities, step_size, box):
 
 @njit
 def calc_velocitiesv2v(velocities, forces, step_size):
-    # With mass equal to one, acceleration is numerically equal to force.
+    #calculate velocities from the forces
     velocities += 0.5 * forces * step_size
     return velocities
 
@@ -286,7 +285,7 @@ def calc_velocitiesv2v(velocities, forces, step_size):
 @njit
 def bussi_thermostat(velocities, T_target, step_size, tau_t):
     """Apply Bussi thermostat for equilibration.
-    Rescale velocities to sample the canonical distribution at the target temperature.
+    Rescale velocities to achieve the target temperature
     """
     if tau_t <= 0.0:
         return velocities
@@ -297,10 +296,11 @@ def bussi_thermostat(velocities, T_target, step_size, tau_t):
     if kinetic_energy <= 0.0 or n_dof <= 0:
         return velocities
 
+    #calculate the target kinetic energy
     target_kinetic_energy = 0.5 * n_dof * T_target
     c = np.exp(-step_size / tau_t)
 
-    # Calculating the new kinetic energy according to Bussi rescale from the lecture.
+    #calculate the target kinetic energy using Bussi 
     R = np.random.normal()
     S = np.random.gamma(0.5 * (n_dof - 1), 2.0)
 
@@ -312,10 +312,11 @@ def bussi_thermostat(velocities, T_target, step_size, tau_t):
         )
     )
 
-    # Roundoff can only make this very slightly negative.
+    #make sure it is not negative
     if new_kinetic_energy < 0.0:
         new_kinetic_energy = 0.0
 
+    #calculate factor to rescale the velocites
     alpha = np.sqrt(new_kinetic_energy / kinetic_energy)
     velocities *= alpha
     return velocities
